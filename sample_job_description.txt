@@ -1,0 +1,8 @@
+We are hiring a Backend Software Engineer with strong experience in Python,
+Django or Flask, and REST API design. The ideal candidate has hands-on
+experience with SQL databases, Docker, and cloud platforms such as AWS or GCP.
+Familiarity with CI/CD pipelines, Git, and Agile/Scrum workflows is required.
+Experience with data analysis (pandas, numpy) and basic machine learning
+concepts is a strong plus. Excellent communication and problem-solving skills
+are essential, along with the ability to work independently in a fast-paced
+environment.
