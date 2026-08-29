@@ -26,6 +26,14 @@ Plotly charts and animated radial gauges.
 - **Skill Gap tab**: compare your resume against a custom job
   description, a curated role profile, or a specific tool/technology,
   with a coverage gauge and an estimated time-to-close by priority.
+- **Resume Health Check tab**: score your resume against a fixed
+  internal rubric (Content 35%, Keywords 25%, Formatting 25%, Skills
+  15%) — no job description needed. Shows exactly where points were
+  lost, how many points you need to clear the 85-point "recruiter-grade"
+  line, and a per-component checklist of concrete findings. Rule-based
+  and dependency-free by default (`resume_health_scorer.py`), with an
+  optional LLM-enhanced mode that follows the same
+  try/fallback-to-template pattern already used by `llm_feedback.py`.
 
 ---
 
@@ -40,6 +48,7 @@ resume_analyzer/
 ├── utils.py                   # File validation + PDF/DOCX text extraction
 ├── keyword_extractor.py       # spaCy-based keyword extraction & JD matching
 ├── ats_scorer.py               # Rule-based ATS structure/formatting scorer
+├── resume_health_scorer.py     # Fixed-rubric Resume Health Check scorer (no JD needed)
 ├── llm_feedback.py             # Feedback generation (template / Ollama / HF backends)
 ├── sample_job_description.txt  # Example JD for quick testing
 ├── .streamlit/config.toml      # Native Streamlit theme (colors, font)

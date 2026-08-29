@@ -24,12 +24,26 @@ analyses
     missing_keywords  TEXT     -- comma separated
     feedback          TEXT     -- AI / rule-based generated feedback
     created_at        TEXT (ISO timestamp)
+
+health_checks
+    id                 INTEGER PRIMARY KEY
+    resume_id          INTEGER  (FK -> resumes.id)
+    overall_score       REAL     -- 0-100, rubric-weighted blend of the 4 components
+    component_scores    TEXT     -- JSON-encoded per-component breakdown (scores,
+                                     weights, checklist findings, explanations,
+                                     points lost) — the full dict returned by
+                                     resume_health_scorer.generate_resume_health(),
+                                     kept as one JSON blob rather than a wide set of
+                                     columns since the rubric's shape (which checks
+                                     exist per component) is defined in code, not SQL.
+    created_at          TEXT (ISO timestamp)
 """
 
 import sqlite3
 import datetime
+import json
 from contextlib import contextmanager
-from typing import List
+from typing import Dict, List
 
 from config import DB_PATH
 
@@ -86,6 +100,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS health_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resume_id INTEGER NOT NULL,
+                overall_score REAL NOT NULL,
+                component_scores TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (resume_id) REFERENCES resumes (id)
+            )
+            """
+        )
 
 
 def save_resume(filename: str, raw_text: str) -> int:
@@ -127,6 +153,31 @@ def save_analysis(
                 ", ".join(matched_keywords),
                 ", ".join(missing_keywords),
                 feedback,
+                datetime.datetime.utcnow().isoformat(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def save_health_check(resume_id: int, overall_score: float, component_scores: Dict) -> int:
+    """
+    Persists a Resume Health Check result and returns its new row id.
+    component_scores is the full dict returned by
+    resume_health_scorer.generate_resume_health() (overall_score +
+    per-component scores/weights/checks/explanations/points_lost) and is
+    stored JSON-encoded, matching the "single JSON blob for a
+    code-defined shape" choice documented in the module docstring above.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO health_checks (resume_id, overall_score, component_scores, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                resume_id,
+                overall_score,
+                json.dumps(component_scores),
                 datetime.datetime.utcnow().isoformat(),
             ),
         )

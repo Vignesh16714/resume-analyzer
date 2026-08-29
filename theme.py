@@ -12,6 +12,8 @@ upload_hint) so app.py's structure barely changes — mostly you wrap
 existing widgets in the new helper containers.
 """
 
+import re
+
 COLORS = {
     # Surfaces
     "bg": "#FFFFFF",
@@ -50,6 +52,25 @@ COLORS = {
     "border": "#E5E7EB",
     "border_strong": "#D1D5DB",
 }
+
+
+def _render_html(html: str) -> None:
+    """
+    Renders a raw HTML/SVG string via st.markdown(unsafe_allow_html=True).
+
+    st.markdown still runs the string through a CommonMark-compliant
+    parser before letting the HTML through, and CommonMark treats any
+    line indented 4+ spaces as a literal code block — which is exactly
+    how our multi-line f-strings are written for readability. Left as-is,
+    that can make the raw markup render as visible text instead of being
+    drawn (most noticeable on multi-line tags, like the gauge's <text>
+    elements). Collapsing all runs of whitespace to a single space
+    removes that indentation while leaving HTML and CSS unaffected (both
+    are whitespace-insensitive at this granularity), so every helper
+    below should call this instead of st.markdown directly.
+    """
+    import streamlit as st
+    st.markdown(re.sub(r"\s+", " ", html).strip(), unsafe_allow_html=True)
 
 
 def inject_global_css() -> None:
@@ -294,23 +315,20 @@ def slider_card(key: str, label: str, value, icon: str = "⏱️"):
     import streamlit as st
     ctx = st.container(key=f"slidercard_{key}")
     with ctx:
-        st.markdown(
+        _render_html(
             f"""<div class="rb-slider-header">
                     <div class="rb-slider-title">{icon} {label}</div>
                     <div class="rb-slider-value">{value}h</div>
-                </div>""",
-            unsafe_allow_html=True,
+                </div>"""
         )
     return ctx
 
 
 def slider_minmax_caption(min_val, max_val, unit: str = "h") -> None:
-    import streamlit as st
-    st.markdown(
+    _render_html(
         f"""<div class="rb-slider-minmax">
                 <span>{min_val}{unit} (min)</span><span>{max_val}{unit} (max)</span>
-            </div>""",
-        unsafe_allow_html=True,
+            </div>"""
     )
 
 
@@ -324,7 +342,18 @@ def score_kind(value: float) -> str:
 
 
 def radial_gauge(label: str, value: float, kind: str = "accent", max_value: float = 100,
-                  size: int = 150, stroke: int = 12, gauge_id: str = "") -> None:
+                  size: int = 150, stroke: int = 12, gauge_id: str = "",
+                  target_tick: float = None) -> None:
+    """
+    Renders an animated SVG radial gauge (used for the ATS score
+    breakdown, skill-gap coverage, and the Resume Health Check score).
+
+    target_tick (optional) draws a short perpendicular tick mark on the
+    ring at that value — e.g. target_tick=85 for the Resume Health Check's
+    "recruiter-grade line" marker — so the gauge itself visually shows how
+    far the current value is from a fixed target, not just its own fill.
+    """
+    import math
     import streamlit as st
 
     c = COLORS
@@ -344,6 +373,23 @@ def radial_gauge(label: str, value: float, kind: str = "accent", max_value: floa
     anim_name = f"rbGaugeFill_{gauge_id or label}".replace(" ", "_").replace("/", "_").replace("&", "")
     anim_name = "".join(ch for ch in anim_name if ch.isalnum() or ch == "_")
 
+    # Tick mark: a short line drawn perpendicular to the ring at the angle
+    # corresponding to target_tick, on top of the ring so it reads as a
+    # "clear this line" marker regardless of the current fill color.
+    tick_svg = ""
+    if target_tick is not None:
+        tick_pct = max(0, min(100, (target_tick / max_value) * 100))
+        angle_rad = math.radians((tick_pct / 100) * 360 - 90)
+        tick_half = stroke * 0.9
+        x1 = cx + (radius - tick_half) * math.cos(angle_rad)
+        y1 = cy + (radius - tick_half) * math.sin(angle_rad)
+        x2 = cx + (radius + tick_half) * math.cos(angle_rad)
+        y2 = cy + (radius + tick_half) * math.sin(angle_rad)
+        tick_svg = (
+            f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+            f'stroke="{c["text_primary"]}" stroke-width="3" stroke-linecap="round" />'
+        )
+
     html = f"""
     <div class="rb-gauge-wrap">
       <style>
@@ -362,9 +408,11 @@ def radial_gauge(label: str, value: float, kind: str = "accent", max_value: floa
                 stroke-dashoffset="{circumference:.2f}"
                 transform="rotate(-90 {cx} {cy})"
                 style="animation: {anim_name} 1.1s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards;" />
+        {tick_svg}
         <text x="50%" y="46%" text-anchor="middle" dominant-baseline="middle"
               font-family="Inter, sans-serif" font-size="{size * 0.22:.0f}" font-weight="800"
-              fill="{c['text_primary']}">{value:.0f}</text>
+              fill="{c['text_primary']}" class="rb-gauge-num"
+              data-rb-target-value="{value:.0f}" data-rb-anim-key="{anim_name}">{value:.0f}</text>
         <text x="50%" y="63%" text-anchor="middle" dominant-baseline="middle"
               font-family="Inter, sans-serif" font-size="{size * 0.11:.0f}" font-weight="600"
               fill="{text_color}">/ {max_value:.0f}</text>
@@ -372,7 +420,7 @@ def radial_gauge(label: str, value: float, kind: str = "accent", max_value: floa
       <div class="rb-gauge-label">{label}</div>
     </div>
     """
-    st.markdown(html, unsafe_allow_html=True)
+    _render_html(html)
 
 
 def badge(text: str, kind: str = "accent") -> str:
@@ -395,3 +443,64 @@ def status_line(passed: bool, text: str) -> str:
     if passed:
         return f'<div style="color:{c["success_text"]}; margin:0.25rem 0;">✅ {text}</div>'
     return f'<div style="color:{c["danger_text"]}; margin:0.25rem 0;">❌ {text}</div>'
+
+
+def target_progress_bar(score: float, target: float, height: int = 22) -> None:
+    """
+    Resume Health Check's "you need N points, your fixes are worth up to
+    M" bar: today's score filled solid, a diagonal-hatch pattern for the
+    reachable-but-unfilled portion up to `target`, a vertical marker line
+    at `target`, and a pill labeling that marker as the recruiter-grade
+    line. Pure CSS (repeating-linear-gradient for the hatch), no JS, so
+    it can't fail to render.
+    """
+    c = COLORS
+    score_pct = max(0.0, min(100.0, score))
+    target_pct = max(0.0, min(100.0, target))
+    fill_color = c["success_fill"] if score_pct >= target_pct else c["accent"]
+    hatch_width = max(0.0, target_pct - score_pct)
+
+    html = f"""
+    <div style="position:relative; width:100%; margin: 2.1rem 0 0.5rem 0;">
+      <div style="position:absolute; left:{target_pct:.2f}%; top:-2.15rem; transform:translateX(-50%);
+                   background:{c['accent_bg']}; color:{c['accent_dark']}; font-weight:700;
+                   font-size:0.78rem; padding:0.2rem 0.6rem; border-radius:999px;
+                   white-space:nowrap; border:1px solid {c['accent']}; z-index:2;">
+        Recruiter-grade &middot; {target_pct:.0f}
+      </div>
+      <div style="position:relative; height:{height}px; border-radius:{height / 2:.0f}px;
+                   background:{c['border']}; overflow:hidden;">
+        <div style="position:absolute; left:0; top:0; bottom:0; width:{score_pct:.2f}%;
+                     background:{fill_color}; border-radius:{height / 2:.0f}px 0 0 {height / 2:.0f}px;
+                     transition: width 0.6s ease;"></div>
+        <div style="position:absolute; left:{score_pct:.2f}%; top:0; bottom:0; width:{hatch_width:.2f}%;
+                     background-image: repeating-linear-gradient(45deg, {c['accent']}66 0 6px,
+                                        transparent 6px 12px);"></div>
+      </div>
+      <div style="position:absolute; left:{target_pct:.2f}%; top:-2px; bottom:-2px; width:2px;
+                   background:{c['text_primary']}; z-index:1;"></div>
+    </div>
+    """
+    _render_html(html)
+
+
+def points_lost_bar(points_lost: float, max_points_lost: float, kind: str = "danger") -> None:
+    """
+    Small horizontal bar used inside each row of the "Where you lost
+    points" panel — length is proportional to this component's
+    points_lost relative to the biggest point-loser among all components,
+    so the worst offender always reads as a full-width bar.
+    """
+    c = COLORS
+    fill_map = {"accent": c["accent"], "success": c["success_fill"],
+                "warning": c["warning_fill"], "danger": c["danger_fill"]}
+    fill_color = fill_map.get(kind, c["danger_fill"])
+    pct = 0 if max_points_lost <= 0 else max(4, min(100, (points_lost / max_points_lost) * 100))
+
+    html = f"""
+    <div style="height:10px; border-radius:6px; background:{c['border']}; overflow:hidden; margin:0.4rem 0;">
+      <div style="height:100%; width:{pct:.2f}%; background:{fill_color}; border-radius:6px;
+                   transition: width 0.6s ease;"></div>
+    </div>
+    """
+    _render_html(html)

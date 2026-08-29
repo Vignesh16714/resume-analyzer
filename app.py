@@ -22,6 +22,7 @@ Run with:  streamlit run app.py
 
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 import db
 from utils import validate_file, extract_text, clean_text, ResumeParsingError
@@ -32,10 +33,19 @@ from config import FEEDBACK_BACKEND
 from theme import (
     COLORS, inject_global_css, card, radial_gauge, score_kind, badge,
     status_line, segmented, picker_group, slider_card, slider_minmax_caption,
+    target_progress_bar, points_lost_bar,
 )
-from components import render_hero, enable_button_tilt, restyle_uploader_copy
+from components import (
+    render_hero, enable_button_tilt, restyle_uploader_copy, animate_gauge_counts,
+    inject_tool_logos,
+)
+from tech_icons import TECH_LOGOS
 from skills_data import ROLE_SKILL_MAP, TOOL_SKILL_MAP, ROLE_ICONS, TOOL_ICONS
 from skill_gap import build_target_skills_from_jd, compute_skill_gap, estimate_time_to_close, summarize_gap
+from resume_health_scorer import (
+    generate_resume_health, status_tier, rank_components_by_points_lost,
+    RECRUITER_GRADE_LINE, COMPONENT_ICONS,
+)
 
 # ------------------------------------------------------------------
 # Page setup, theme injection & one-time DB initialization
@@ -51,16 +61,84 @@ db.init_db()
 render_hero(COLORS)
 enable_button_tilt()
 restyle_uploader_copy()
+animate_gauge_counts()
+# Swaps the emoji on each "By Tool" picker button (Skill Gap tab) for a
+# real bundled SVG logo (React, Docker, Python, Kubernetes, AWS, ...).
+# Degrades to the plain emoji if this can't run — see components.py.
+inject_tool_logos(TECH_LOGOS, TOOL_ICONS)
 
 st.caption(f"Feedback backend: **{FEEDBACK_BACKEND}**")
 
-tab_analyze, tab_skillgap = st.tabs(
-    ["🔍 Analyze Resume", "🎯 Skill Gap"]
+tab_analyze, tab_skillgap, tab_health = st.tabs(
+    ["🔍 Analyze Resume", "🎯 Skill Gap", "🩺 Resume Health Check"]
 )
 
 # A small chart layout template so every Plotly chart matches the theme's
 # fonts/colors instead of Plotly's default gray/blue palette.
 CHART_FONT = dict(family="Inter, -apple-system, Segoe UI, Roboto, sans-serif", color=COLORS["text_primary"])
+
+MAX_RADAR_SKILLS = 14  # keep the polar chart legible even for JD mode's ~18 skills
+
+
+def render_skill_radar(target_skills, matched, missing, target_label):
+    """
+    Builds a two-trace Scatterpolar ("radar"/"spider") chart: a dotted
+    outer ring showing the full target skill profile (always 100 — i.e.
+    "fully covered"), and a filled inner shape showing which of those
+    skills the resume actually demonstrates (100 = matched, 0 = missing).
+    The gap between the two shapes *is* the skill gap, visually.
+
+    target_skills is used (rather than gap["matched"]/["missing"] alone)
+    so the axis order matches how skills were originally ranked/curated,
+    not the priority-sorted order compute_skill_gap() returns them in.
+    """
+    matched_names = {s["name"] for s in matched}
+    truncated = len(target_skills) > MAX_RADAR_SKILLS
+    skills_for_chart = target_skills[:MAX_RADAR_SKILLS]
+
+    labels = [s["name"] for s in skills_for_chart]
+    resume_values = [100 if s["name"] in matched_names else 0 for s in skills_for_chart]
+    target_values = [100] * len(labels)
+
+    # Close the polygon by repeating the first point at the end.
+    labels_loop = labels + labels[:1]
+    resume_loop = resume_values + resume_values[:1]
+    target_loop = target_values + target_values[:1]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=target_loop, theta=labels_loop, name=f"Target: {target_label}",
+        fill="toself", fillcolor="rgba(124, 58, 237, 0.06)",
+        line=dict(color=COLORS["border_strong"], dash="dot", width=1.5),
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatterpolar(
+        r=resume_loop, theta=labels_loop, name="Your Resume",
+        fill="toself", fillcolor="rgba(37, 99, 235, 0.28)",
+        line=dict(color=COLORS["accent"], width=2.5),
+        marker=dict(size=6, color=COLORS["accent"]),
+        hovertemplate="%{theta}: %{customdata}<extra></extra>",
+        customdata=["Covered" if v == 100 else "Missing" for v in resume_values] + (
+            ["Covered" if resume_values[0] == 100 else "Missing"] if resume_values else []
+        ),
+    ))
+    fig.update_layout(
+        polar=dict(
+            bgcolor=COLORS["panel"],
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
+                             gridcolor=COLORS["border"]),
+            angularaxis=dict(gridcolor=COLORS["border"],
+                              tickfont=dict(size=11, color=COLORS["text_primary"])),
+        ),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="center", x=0.5,
+                    font=CHART_FONT),
+        paper_bgcolor=COLORS["bg"],
+        font=CHART_FONT,
+        margin=dict(l=50, r=50, t=30, b=30),
+        height=440,
+    )
+    return fig, truncated
 
 # ====================================================================
 # TAB 1 — Analyze a new resume
@@ -410,6 +488,20 @@ with tab_skillgap:
                                 unsafe_allow_html=True,
                             )
 
+                    with card("sg_radar"):
+                        st.markdown("#### 🕸️ Skill Profile Radar")
+                        radar_fig, radar_truncated = render_skill_radar(
+                            target_skills, gap["matched"], gap["missing"], target_label
+                        )
+                        st.plotly_chart(radar_fig, width="stretch")
+                        st.caption(
+                            "The dotted outline is the full target skill profile; the filled "
+                            "shape is where your resume currently reaches it. Any gap between "
+                            "the two is a skill worth closing."
+                            + (f" Showing the top {MAX_RADAR_SKILLS} of {len(target_skills)} "
+                               f"target skills for readability." if radar_truncated else "")
+                        )
+
                     with card("sg_matched"):
                         st.markdown("#### ✅ Skills You Already Show")
                         if gap["matched"]:
@@ -447,3 +539,182 @@ with tab_skillgap:
                 st.error(f"⚠️ {e}")
             except Exception as e:
                 st.error(f"An unexpected error occurred while analyzing skill gap: {e}")
+
+# ====================================================================
+# TAB 3 — Resume Health Check (fixed internal rubric, no JD needed)
+# ====================================================================
+with tab_health:
+    # Results live in session_state, same pattern as tab_analyze/tab_skillgap,
+    # so they persist across reruns triggered by any widget on the page.
+    if "hc_results" not in st.session_state:
+        st.session_state.hc_results = None
+
+    with card("hc_upload"):
+        st.subheader("1. Upload your resume")
+        st.caption(
+            "No job description needed here — this scores your resume against "
+            "a fixed internal rubric (Content, Keywords, Formatting, Skills)."
+        )
+        hc_resume_file = st.file_uploader("PDF or DOCX", type=["pdf", "docx"], key="hc_resume_uploader")
+        hc_analyze_clicked = st.button(
+            "🩺 Run Health Check", type="primary", width="stretch", key="hc_analyze_btn"
+        )
+
+    if hc_analyze_clicked:
+        if hc_resume_file is None:
+            st.warning("Please upload a resume file first.")
+        else:
+            try:
+                hc_file_bytes = hc_resume_file.read()
+
+                validate_file(hc_resume_file.name, hc_file_bytes)
+                with st.spinner("Reading resume..."):
+                    hc_raw_text = extract_text(hc_resume_file.name, hc_file_bytes)
+                    hc_clean_text = clean_text(hc_raw_text)
+
+                with st.spinner("Scoring against the rubric..."):
+                    health = generate_resume_health(hc_clean_text)
+
+                hc_resume_id = db.save_resume(hc_resume_file.name, hc_clean_text)
+                hc_check_id = db.save_health_check(
+                    resume_id=hc_resume_id,
+                    overall_score=health["overall_score"],
+                    component_scores=health,
+                )
+
+                st.session_state.hc_results = {**health, "check_id": hc_check_id}
+                st.rerun()
+
+            except ResumeParsingError as e:
+                st.error(f"⚠️ {e}")
+            except Exception as e:
+                st.error(f"An unexpected error occurred while running the health check: {e}")
+
+    hc_results = st.session_state.hc_results
+    if hc_results is not None:
+        overall = hc_results["overall_score"]
+        components = hc_results["components"]
+        ranked = rank_components_by_points_lost(components)
+
+        kind, label = status_tier(overall)
+        points_to_target = max(0.0, round(RECRUITER_GRADE_LINE - overall, 1))
+        total_lost = round(100 - overall, 1)
+        total_recoverable = round(sum(c["points_lost"] for c in components.values()), 1)
+
+        # --- 1. Hero result: gauge + status badge + caption --------------
+        with card("hc_hero"):
+            st.markdown(f"#### Your resume scored **{overall:.0f}** out of 100")
+            hero_l, hero_mid, hero_r = st.columns([1, 1, 1])
+            with hero_mid:
+                radial_gauge(
+                    "Overall Score", overall, kind=kind, gauge_id="health_overall",
+                    size=190, target_tick=RECRUITER_GRADE_LINE,
+                )
+                if points_to_target > 0:
+                    badge_text = f"{label} · {points_to_target:.0f} pts from {RECRUITER_GRADE_LINE}"
+                else:
+                    badge_text = label
+                st.markdown(
+                    f"<div style='text-align:center; margin-top:0.5rem;'>{badge(badge_text, kind)}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div style='text-align:center; margin-top:0.4rem; color:{COLORS['text_muted']}; "
+                    f"font-size:0.85rem;'>{RECRUITER_GRADE_LINE}+ is the recruiter-grade line on our rubric.</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # --- 2. Where you lost points -------------------------------------
+        with card("hc_points_lost"):
+            head_l, head_r = st.columns([3, 1])
+            with head_l:
+                st.markdown("#### Where you lost points")
+            with head_r:
+                st.markdown(
+                    f"<div style='text-align:right; font-weight:800; color:{COLORS['danger_text']}; "
+                    f"font-size:1.05rem; margin-top:0.3rem;'>-{total_lost:.0f} of 100</div>",
+                    unsafe_allow_html=True,
+                )
+
+            max_lost = max((c["points_lost"] for _, c in ranked), default=0)
+            for i, (name, comp) in enumerate(ranked):
+                row_l, row_r = st.columns([5, 1])
+                with row_l:
+                    title = f"**{COMPONENT_ICONS.get(name, '')} {name}**"
+                    st.markdown(title)
+                    if i == 0 and comp["points_lost"] > 0:
+                        st.markdown(badge("BIGGEST DRAG", "danger"), unsafe_allow_html=True)
+                    st.caption(f"Scored {comp['score']:.0f}/100 · {comp['weight'] * 100:.0f}% weight")
+                    points_lost_bar(comp["points_lost"], max_lost, kind="danger" if i == 0 else "warning")
+                with row_r:
+                    st.markdown(
+                        f"<div style='text-align:right; font-weight:800; color:{COLORS['danger_text']}; "
+                        f"font-size:1.15rem; margin-top:1.2rem;'>-{comp['points_lost']:.0f}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # --- 3. Points-to-target progress bar -----------------------------
+        with card("hc_target"):
+            st.markdown(
+                f"#### You need {points_to_target:.0f} points. "
+                f"Your fixes are worth up to {total_recoverable:.0f}."
+            )
+            target_progress_bar(overall, RECRUITER_GRADE_LINE)
+            st.markdown(
+                f"<div style='color:{COLORS['text_muted']}; font-size:0.88rem; margin-top:0.4rem;'>"
+                f"You only need {points_to_target:.0f} points to clear the line — and you have up to "
+                f"{total_recoverable:.0f} points of fixes in hand.</div>",
+                unsafe_allow_html=True,
+            )
+
+        # --- 4. Per-component detail cards (2-column grid) ----------------
+        st.markdown("#### Detailed Breakdown")
+        top_two_names = {name for name, comp in ranked[:2] if comp["points_lost"] > 0}
+        comp_names = list(components.keys())
+
+        for row_start in range(0, len(comp_names), 2):
+            row_names = comp_names[row_start:row_start + 2]
+            detail_cols = st.columns(2)
+            for col, name in zip(detail_cols, row_names):
+                comp = components[name]
+                with col:
+                    with card(f"hc_detail_{name.lower()}"):
+                        dh_l, dh_r = st.columns([3, 2])
+                        with dh_l:
+                            st.markdown(f"##### {COMPONENT_ICONS.get(name, '')} {name}")
+                            if comp["points_lost"] > 0:
+                                if name in top_two_names:
+                                    st.markdown(badge("CRITICAL", "danger"), unsafe_allow_html=True)
+                                else:
+                                    st.markdown(badge("COSTING POINTS", "warning"), unsafe_allow_html=True)
+                        with dh_r:
+                            st.markdown(
+                                f"<div style='text-align:right;'>"
+                                f"<div style='font-weight:800; font-size:1.15rem; color:{COLORS['text_primary']};'>"
+                                f"{comp['score']:.0f}/100</div>"
+                                f"<div style='color:{COLORS['danger_text']}; font-weight:700; font-size:0.9rem;'>"
+                                f"-{comp['points_lost']:.0f} pts</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                        st.markdown(
+                            f"<div style='color:{COLORS['text_muted']}; line-height:1.5; "
+                            f"margin: 0.5rem 0 0.9rem 0;'>{comp['explanation']}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        checklist_html = "".join(
+                            status_line(passed, check_name) for check_name, passed in comp["checks"].items()
+                        )
+                        st.markdown(checklist_html, unsafe_allow_html=True)
+
+                        st.markdown(
+                            f"<div style='display:flex; justify-content:space-between; margin-top:0.9rem; "
+                            f"padding-top:0.6rem; border-top:1px solid {COLORS['border']}; "
+                            f"color:{COLORS['text_muted']}; font-size:0.85rem;'>"
+                            f"<span>Component weight {comp['weight'] * 100:.0f}%</span>"
+                            f"<span>Points lost: -{comp['points_lost']:.0f}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )

@@ -32,6 +32,30 @@ Two components:
                              (e.g. in constrained embeds), nothing looks broken
                              — the buttons simply lose the cursor-tracked tilt
                              and fall back to the CSS-only hover state.
+
+  animate_gauge_counts()  -- another zero-height component: tweens each
+                             radial gauge's center number from 0 up to
+                             its real value in sync with the gauge ring's
+                             CSS stroke animation (theme.radial_gauge).
+                             Same reach-into-parent-document pattern, same
+                             graceful no-op if the embed is restricted —
+                             the number then just renders at its final
+                             value with no animation.
+
+  inject_tool_logos()     -- another zero-height component: swaps the
+                             emoji on each "By Tool" picker button (Skill
+                             Gap tab) for the matching bundled SVG logo
+                             from tech_icons.TECH_LOGOS. It identifies
+                             each button by its visible tool-name text,
+                             then does a plain string replace of the
+                             known emoji character inside that button's
+                             innerHTML — no fragile assumptions about
+                             Streamlit's internal DOM structure. Same
+                             reach-into-parent-document / interval-rescan
+                             / try-catch-noop pattern as the enhancers
+                             above, so if it can't run, the buttons simply
+                             keep showing their emoji — never a broken or
+                             blank icon.
 """
 
 import streamlit.components.v1 as components
@@ -307,6 +331,86 @@ def enable_button_tilt() -> None:
     components.html(html, height=0, width=0)
 
 
+def animate_gauge_counts() -> None:
+    """
+    Invisible (zero-height) component that tweens each radial gauge's
+    center number from 0 up to its real score whenever a *new* gauge
+    (identified by data-rb-anim-key, which is unique per label/value)
+    appears in the parent document. Timed to start at the same 0.1s
+    delay and run over roughly the same ~1.1s window as the gauge's
+    CSS stroke-fill animation (see theme.radial_gauge), so the number
+    and the ring finish together.
+
+    Safe to call once per page render. Like enable_button_tilt(), it
+    re-scans on an interval so gauges added after a rerun (e.g. once
+    analysis results appear) are picked up without a page reload, and
+    it no-ops harmlessly if the parent document isn't reachable.
+    """
+    html = """
+    <script>
+      (function() {
+        var DURATION = 1100;   // ms — matches the gauge's stroke-fill animation
+        var DELAY = 100;       // ms — matches the gauge's animation-delay
+
+        function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+        function animateNode(el) {
+          var target = parseFloat(el.dataset.rbTargetValue || "0");
+          if (isNaN(target)) return;
+          var start = null;
+
+          // Only drop to 0 here, at the moment we KNOW the animation is
+          // actually going to run. If this script never executes (e.g.
+          // blocked cross-frame access), the element keeps showing the
+          // real value that theme.py already rendered — never a stuck 0.
+          el.textContent = "0";
+
+          function tick(ts) {
+            if (start === null) start = ts;
+            var elapsed = ts - start;
+            if (elapsed < DELAY) {
+              requestAnimationFrame(tick);
+              return;
+            }
+            var progress = Math.min((elapsed - DELAY) / DURATION, 1);
+            var current = target * easeOutCubic(progress);
+            el.textContent = Math.round(current);
+            if (progress < 1) {
+              requestAnimationFrame(tick);
+            } else {
+              el.textContent = Math.round(target);
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        function run() {
+          try {
+            var doc = window.parent.document;
+            var nums = doc.querySelectorAll('text.rb-gauge-num');
+            nums.forEach(function(el) {
+              var key = el.dataset.rbAnimKey || "";
+              // Re-animate only when this exact gauge (label+value) is new,
+              // so persisted results don't re-trigger the count-up on every
+              // unrelated rerun (e.g. typing in the job description box).
+              if (el.dataset.rbAnimatedKey === key) return;
+              el.dataset.rbAnimatedKey = key;
+              animateNode(el);
+            });
+          } catch (err) {
+            // Cross-origin or restricted embed: silently no-op.
+            // Numbers simply render at their final value with no count-up.
+          }
+        }
+
+        run();
+        setInterval(run, 700);
+      })();
+    </script>
+    """
+    components.html(html, height=0, width=0)
+
+
 def restyle_uploader_copy() -> None:
     """
     Rewrites the native Streamlit uploader's instruction text to match the
@@ -338,6 +442,77 @@ def restyle_uploader_copy() -> None:
         run();
         setInterval(run, 1000);
       })();
+    </script>
+    """
+    components.html(html, height=0, width=0)
+
+
+def inject_tool_logos(logos: dict, emoji_map: dict) -> None:
+    """
+    Swaps the emoji shown on each "By Tool" picker button (see
+    skills_data.TOOL_ICONS, rendered via app.py's picker_group loop) for
+    the matching bundled SVG logo in tech_icons.TECH_LOGOS.
+
+    `logos`     -- tech_icons.TECH_LOGOS (tool name -> raw <svg> markup)
+    `emoji_map` -- skills_data.TOOL_ICONS (tool name -> the emoji
+                   currently rendered on that button), so the script
+                   knows exactly which character to replace.
+
+    Matching is done by the button's plain textContent (which tool name
+    it contains), then the replacement is a straight string swap of the
+    known emoji character inside that button's innerHTML — deliberately
+    avoiding any assumption about which wrapper tags Streamlit puts
+    around a button's label, since that's an internal detail that can
+    change between versions. Only tools present in `logos` are touched;
+    any tool without a bundled SVG (or any button that isn't a tool
+    picker at all) is left completely alone.
+
+    Safe to call once per page render — like the other enhancers here,
+    it re-scans on an interval so buttons rendered after a rerun (e.g.
+    switching into "By Tool" mode) get patched without a reload, and it
+    no-ops harmlessly if the parent document isn't reachable. If this
+    script never runs, buttons simply keep showing their emoji.
+    """
+    import json
+
+    logos_json = json.dumps(logos)
+    emoji_json = json.dumps(emoji_map)
+    html = f"""
+    <script>
+      (function() {{
+        var LOGOS = {logos_json};
+        var EMOJI = {emoji_json};
+
+        function patch(doc) {{
+          var buttons = doc.querySelectorAll('.stButton > button');
+          buttons.forEach(function(btn) {{
+            if (btn.dataset.rbLogoPatched) return;
+            var text = btn.textContent || '';
+            for (var tool in LOGOS) {{
+              if (text.indexOf(tool) === -1) continue;
+              var emoji = EMOJI[tool];
+              if (emoji && btn.innerHTML.indexOf(emoji) !== -1) {{
+                var span = '<span style="display:inline-flex;align-items:center;' +
+                           'justify-content:center;width:28px;height:28px;">' +
+                           LOGOS[tool] + '</span>';
+                btn.innerHTML = btn.innerHTML.replace(emoji, span);
+                btn.dataset.rbLogoPatched = "1";
+              }}
+              break;
+            }}
+          }});
+        }}
+
+        function run() {{
+          try {{ patch(window.parent.document); }} catch (err) {{
+            // Cross-origin or restricted embed: silently no-op.
+            // Buttons keep showing their emoji, never a broken icon.
+          }}
+        }}
+
+        run();
+        setInterval(run, 1000);
+      }})();
     </script>
     """
     components.html(html, height=0, width=0)
